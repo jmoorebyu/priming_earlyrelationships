@@ -1,0 +1,308 @@
+---
+title: "Priming ACE - Study 1"
+output: html_document
+---
+
+############################################################
+###############CLEANING###############
+############################################################
+
+Initializing packages, functions and reading in data
+```{r}
+library(ggplot2)
+library(lavaan)
+
+##Functions that I have created 
+
+#Fence takes outliers and replaces at a pre-set value
+fence <- function(data,var){
+  myvar <- data[[var]]
+  m <- median(myvar,na.rm=TRUE)
+  myvar_iqr <- IQR(myvar,na.rm=TRUE)
+  ul <- m+1.5*myvar_iqr
+  ll <- m-1.5*myvar_iqr
+  myvar[which(myvar>ul)] <- ul
+  myvar[which(myvar<ll)] <- ll
+  return(myvar)
+}
+
+#This function allows us to assess interaction effects by obtaining confidence intervals for
+#the effects of the experiment and different levels of a moderating variable
+conditional.effects <-  function(model, x, m, quantiles = 10){
+  interact = paste0(x,':',m)
+  beta.hat = coef(model) 
+  covs = vcov(model)
+ # return(covs)
+  z0  = quantile(model$model[,m], seq(0 , 1, 1/quantiles))
+  dy.dx = beta.hat[x] + beta.hat[interact]*z0
+  se.dy.dx = sqrt(covs[x, x] + z0^2*covs[interact, interact] + 2*z0*covs[x, interact])
+  upr = dy.dx+1.96*se.dy.dx
+  lwr = dy.dx-1.96*se.dy.dx
+  data.frame(m = z0, b = dy.dx, lwr, upr)
+}
+
+#This scales variables so we can obtain standardized effect sizes
+scalerename <- function(varname,df=survey_data){
+  newname <- paste0(varname,"_std")
+  survey_data[[newname]] <- scale(survey_data[varname])
+  survey_data
+}
+
+survey_data_old <- readRDS("C:/Users/jmoor/OneDrive/Documents/R/TOSA/tosa_survey_merged.RDS")
+survey_data_old$grad <- survey_data_old$STATUS %in% c("Associate","Intern")
+survey_data <- survey_data_old[which(survey_data_old$STATUS %in% c("Master Student","Student")),]
+#including only those who are currently students at TOSA (not graduates)
+```
+
+Further cleaning on demographic variables; fencing and centering key variables
+```{r}
+
+#Cleaning Demographic Variables
+survey_data$race_simple <- survey_data$RACE
+survey_data$race_simple[which(survey_data$RACE %in% c("Native","Pacific Islander","Asian"))] <- "Other"
+survey_data$white <- survey_data$race_simple=="Caucasian"
+survey_data$hispanic <- survey_data$race_simple=="Hispanic"
+survey_data$black <- survey_data$race_simple=="African American"
+survey_data$months <- survey_data$DAYS/30
+survey_data$female <- survey_data$GENDER=="Female"
+survey_data$fromprison <- survey_data$ORIGIN=="Jail/Prison"
+survey_data$ln_charges <- log(survey_data$X..OF.CHARGES+1)
+
+#Fencing Outliers
+fence_vars <- c("tosa_ace","gc","tosa_trust","tosa_independance","selfesteem",covs1)
+for (x in fence_vars){
+  survey_data[[x]] <- fence(survey_data,x)
+}
+
+#Scaling dependent variables to obtain standardized effect sizes
+dvs <- c("tosa_trust","tosa_independance","selfesteem")
+for (x in dvs){
+  survey_data <- scalerename(x)
+}
+
+#Creating interaction terms
+
+survey_data$aceprime <- as.numeric(survey_data$order==1) #creating intuitive variable name from conditions assignment
+survey_data$ace_c <- survey_data$tosa_ace - mean(survey_data$tosa_ace,na.rm=TRUE) #centering our key moderator
+survey_data$primeXace <- survey_data$aceprime*survey_data$tosa_ace
+survey_data$primeXace_c <- survey_data$aceprime*survey_data$ace_c
+
+```
+
+############################################################
+###############Preliminary Analyses###############
+############################################################
+
+Demographics
+```{r}
+describe(survey_data[c("months","AGE","X..OF.CHARGES")])
+
+prop.table(table(survey_data$any_violent))
+prop.table(table(survey_data$no_crime))
+prop.table(table(survey_data$GENDER))
+prop.table(table(survey_data$race_simple)) #86% white, 6% Black, 6% Hispanic
+
+table(survey_data$SETS.OF.CHARGES)
+```
+
+Randomization check: Looking for whether demographic variables are balanced across conditions
+```{r}
+demvars <- c("any_violent","no_crime","AGE","X..OF.CHARGES","fromprison","months","female","white","hispanic","black","gc","tosa_sc")
+
+aggregate(survey_data[demvars],list(survey_data$aceprime),FUN=mean,na.rm=TRUE)
+for (x in demvars){
+  myformula <- paste0(x,"~aceprime")
+  print(x)
+  print(summary(lm(myformula,survey_data)))
+}
+```
+
+
+Descriptives/reliability
+```{r}
+cor.test(survey_data$trust_1,survey_data$trust_2)
+cor.test(survey_data$indep_1,survey_data$indep_2)
+psych::alpha(survey_data[c("ace_1","ace_2","ace_3r")],check.keys=TRUE)
+```
+
+############################################################
+###############Primary Analyses###############
+############################################################
+
+Main DV of interest Looking at the effect of being assigned to
+think about one's childhood on Trust and its interaction with self-reported adverse childhood
+experiences
+
+```{r}
+mean(survey_data$tosa_ace) #2.65
+sd(survey_data$tosa_ace) #.866
+
+#this is the primary model we focus on throughout study 1
+model1a <- "tosa_trust~x*aceprime+m*ace_c+xm*primeXace_c+AGE+female+ln_days+fromprison+ln_charges+white
+            simpleeffect_high_ace := x+xm*.866
+            simpleeffect_low_ace := x+xm*-.866" #this estimates the effect of condition at high and low levels of adverse childhood experiences (1 SD above and 1 SD below the mean)
+
+output <- sem(model1,data=survey_data,fixed.x=FALSE,missing="FIML")#,se="bootstrap",bootstrap=300)
+summary(output,standardized=TRUE)
+
+#this model  is the exact same, but the dependent variable is made more interpretable by standardizing while we use non-cetnered adverse childhood experiences
+model1b <- "tosa_trust_std~x*aceprime+m*tosa_ace+xm*primeXace+AGE+female+ln_days+fromprison+ln_charges+white
+            simpleeffect_high_ace := x+xm*(2.65+.866)
+            simpleeffect_low_ace := x+xm*(2.65-.866)"
+output <- sem(model1,data=survey_data,fixed.x=FALSE,missing="FIML")#,se="bootstrap",bootstrap=300)
+summary(output,standardized=TRUE)
+
+#exploring the effect at different levels of adverse childhood experiences
+
+model2 <- "tosa_trust_std~x*aceprime+m*tosa_ace+xm*primeXace+AGE+female+ln_days+fromprison+ln_charges+white
+            simpleeffect_ace10 := x+xm*(1.333)
+            simpleeffect_ace20 := x+xm*(2.0)
+            simpleeffect_ace30 := x+xm*(2.17)
+            simpleeffect_ace40 := x+xm*(2.33)
+            simpleeffect_ace50 := x+xm*(2.67)
+            simpleeffect_ace60 := x+xm*(3.0)
+            simpleeffect_ace70 := x+xm*(3.33)
+            simpleeffect_ace80 := x+xm*(3.33)
+            simpleeffect_ace90 := x+xm*(3.67)"
+
+output <- sem(model2,data=survey_data,fixed.x=FALSE,missing="FIML")#,se="bootstrap",bootstrap=300)
+summary(output,standardized=TRUE)
+```
+
+Getting estimated means for figure (slightly different, more intuitive analysis)
+```{r}
+
+model1 <- "tosa_trust~x*aceprime+m*ace_c+xm*primeXace_c+AGE+female+ln_days+fromprison+ln_charges+white
+            simpleeffect_high_ace := x+xm*.866
+            simpleeffect_low_ace := x+xm*-.866"
+
+#model without covariates (better captures the relationship between adverse childhood experiences and the dependent variable, makes for clearner and more intuiritive figure)
+model2 <- "tosa_trust~x*aceprime+m*ace_c+xm*primeXace_c
+            simpleeffect_high_ace := x+xm*.866
+            simpleeffect_low_ace := x+xm*-.866"
+
+output <- sem(model1,data=survey_data,fixed.x=FALSE,missing="FIML")#,se="bootstrap",bootstrap=300)
+summary(output,standardized=TRUE)
+
+
+mean(survey_data$tosa_trust,na.rm=TRUE) #4.03 is the mean overall
+
+#intercept: 4.14
+#ace prime : -.2
+#ace: .14
+#int: -.48
+
+#High ACE
+4.14+.14 #4.28
+4.14+.14-.2-.48 #3.6
+
+#Low ACE
+4.14-.14 #4
+4.14-.14-.2+.48 #4.28
+
+sd(survey_data[which(survey_data$aceprime==TRUE),"tosa_trust"],na.rm=TRUE)
+```
+
+
+Looking at effects on the secondary dependent variable
+```{r}
+#non-standardized
+model2 <- "tosa_independance~x*aceprime+m*tosa_ace+xm*primeXace+AGE+female+ln_days+fromprison+ln_charges+white
+            simpleeffect_high_ace := x+xm*+.866
+            simpleeffect_low_ace := x+xm*-.866"
+
+#standardized
+model2 <- "tosa_independance_std~x*aceprime+m*tosa_ace_c+xm*primeXace_c+AGE+female+ln_days+fromprison+ln_charges+white
+            simpleeffect_high_ace := x+xm*(2.65+.866)
+            simpleeffect_low_ace := x+xm*(2.65-.866)"
+
+output <- sem(model2,data=survey_data,fixed.x=FALSE,missing="FIML")#,se="bootstrap",bootstrap=300)
+summary(output,standardized=TRUE)
+
+#exploring the effect at different levels of adverse childhood experiences
+model2 <- "tosa_independance_std~x*aceprime+m*tosa_ace+xm*primeXace+AGE+female+ln_days+fromprison+ln_charges+white
+            simpleeffect_ace10 := x+xm*(1.333)
+            simpleeffect_ace20 := x+xm*(2.0)
+            simpleeffect_ace30 := x+xm*(2.17)
+            simpleeffect_ace40 := x+xm*(2.33)
+            simpleeffect_ace50 := x+xm*(2.67)
+            simpleeffect_ace60 := x+xm*(3.0)
+            simpleeffect_ace70 := x+xm*(3.33)
+            simpleeffect_ace80 := x+xm*(3.33)
+            simpleeffect_ace90 := x+xm*(3.67)"
+
+output <- sem(model2,data=survey_data,fixed.x=FALSE,missing="FIML")#,se="bootstrap",bootstrap=300)
+summary(output,standardized=TRUE)
+
+quantile(survey_data$tosa_ace,c(.1,.2,.3,.4,.5,.6,.7,.8,.9))
+
+```
+
+
+
+###############################################################################################
+################Extra/Exploratory Analyses not used in Manuscript######################
+###############################################################################################
+```{r}
+aceint_trust <- lm(tosa_trust_std~aceprime*tosa_ace+AGE+female+ln_days+fromprison+white,survey_data)
+
+con_effects <- conditional.effects(aceint_trust,x="aceprime",m="tosa_ace",quantiles=10)
+test <- con_effects[2:10,] #this was with 10 quantiles
+test2 <- con_effects[4:17,]
+
+test$m <- c(.1,.2,.3,.4,.5,.6,.7,.8,.9)
+
+
+(mod_plot <- ggplot(test[2:8,], 
+       aes(x = m, 
+           y = b, 
+           ymin = lwr,
+           ymax = upr,
+           xmin = .2,
+           xmax=.8)) +
+  geom_smooth(stat = "identity",
+              color = "blue") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  theme_bw() +
+  labs(x = "Childhood Mistreatment",
+       y = "Priming Effect on General Trust"))
+
+```
+
+Effects on Self-esteem (not the primary focus of the analysis, this one was just exploratory)
+```{r}
+
+summary(lm(selfesteem~(order==1),survey_data))
+summary(lm(selfesteem~(order==1)*scale(tosa_ace),survey_data))
+
+
+```
+
+Looking at interaction with specific trust (this is something that was interesting but ultimately was left off the manuscript)
+```{r}
+summary(lm(tosa_trust_std~aceprime*gc,survey_data))
+
+summary(lm(tosa_trust_std~aceprime*tosa_gc_1,survey_data))
+summary(lm(tosa_trust_std~aceprime*tosa_gc_2,survey_data))
+
+summary(lm(tosa_independance~aceprime*gc_5,survey_data))
+
+
+survey_data$gc2Xprime <- scale(survey_data$tosa_gc_2)*survey_data$aceprime
+
+model2 <- "tosa_trust~x*aceprime+m*tosa_ace+xm*gc2Xprime+tosa_gc_2+AGE+female+ln_days+fromprison+ln_charges+white
+            simpleeffect_high_ace := x+xm*(2.65+.866)
+            simpleeffect_low_ace := x+xm*(2.65-.866)"
+
+
+summary(sem(model2,survey_data))
+
+
+model2 <- "tosa_independance~x*aceprime+xm*gc2Xprime+tosa_gc_2+tosa_ace+AGE+female+fromprison+white+ln_days"
+
+
+summary(sem(model2,survey_data))
+        
+       # +AGE+female+ln_days+fromprison+ln_charges+white))
+```
+
